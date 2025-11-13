@@ -30,16 +30,33 @@ HEADERS = [
     "LastUpdated",      # ISO timestamp
 ]
 
-STOP_LOSS_PCT = -3.0     # sell if unarmed and <= -3%
-ARM_THRESHOLD_PCT = 5.0  # mark as Armed at >= +5%
-TRAILING_DROP_PCT = 3.0  # sell when Armed and ATH - current >= 3%
-
 
 def get_env_bool(name: str, default: bool = False) -> bool:
     val = os.getenv(name)
     if val is None:
         return default
     return val.strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def get_env_float(name: str, default: float) -> float:
+    """
+    Read a float value from an environment variable.
+    If missing or invalid, return the provided default.
+    """
+    val = os.getenv(name)
+    if val is None:
+        return default
+    try:
+        return float(val)
+    except ValueError:
+        print(f"WARNING: Invalid float for {name}={val!r}, using default {default}")
+        return default
+
+
+# Strategy parameters
+STOP_LOSS_PCT = get_env_float("STOP_LOSS_PCT", -3.0)  # sell if unarmed and <= this %
+ARM_THRESHOLD_PCT = 5.0   # mark as Armed at >= +5%
+TRAILING_DROP_PCT = 3.0   # sell when Armed and ATH - current >= 3%
 
 
 def load_gspread_worksheet() -> gspread.Worksheet:
@@ -143,6 +160,7 @@ class KrakenTrailingSellBot:
         print(f"Base currency: {self.base_currency}")
         print(f"Polling interval: {self.poll_interval} seconds")
         print(f"Dry run mode: {self.dry_run}")
+        print(f"Configured STOP_LOSS_PCT: {STOP_LOSS_PCT}%")
 
     # ---------- Kraken helpers ----------
 

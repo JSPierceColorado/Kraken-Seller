@@ -9,8 +9,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 from kraken.spot import User, Market, Trade
-# NOTE: Removed:
-# from kraken.exceptions import KrakenException
+from kraken.exceptions import KrakenUnknownAssetError, KrakenInvalidArgumentsError
 
 # ==========================
 # CONFIG / CONSTANTS
@@ -159,6 +158,7 @@ class KrakenTrailingSellBot:
           - zero balances
           - base currency (e.g. USD)
           - obvious fee tokens (KFEE)
+          - altnames containing '.' (e.g. ETH.F) which may not have spot pairs
         """
         balances = self.user.get_balances()
         holdings: Dict[str, Dict[str, Any]] = {}
@@ -171,9 +171,18 @@ class KrakenTrailingSellBot:
             info = self.asset_info.get(asset_code, {})
             altname = info.get("altname", asset_code)
 
+            # Skip base/fiat
             if altname.upper() in (self.base_currency, "USD", "EUR"):
                 continue
+            # Skip fee token
             if altname.upper() == "KFEE":
+                continue
+            # Skip derivative / staked style tokens like ETH.F for this spot bot
+            if "." in altname:
+                print(
+                    f"Skipping holding {altname} ({asset_code}): "
+                    f"contains '.' and may not have a spot {altname}{self.base_currency} pair."
+                )
                 continue
 
             holdings[altname] = {
@@ -200,6 +209,9 @@ class KrakenTrailingSellBot:
         """
         Place a full-position market sell, returns True on "we consider it sold".
         Honors DRY_RUN.
+
+        Note: `reduce_only` is NOT used here because it's only valid
+        for leveraged orders, not spot.
         """
         pair = f"{altname}{self.base_currency}"
         print(
@@ -216,10 +228,17 @@ class KrakenTrailingSellBot:
                 side="sell",
                 pair=pair,
                 volume=balance,
-                reduce_only=True,
             )
             print(f"Kraken order response: {resp}")
             return True
+        except KrakenInvalidArgumentsError as e:
+            # Specifically catch the "reduce_only" / invalid-arguments style issues
+            print(
+                f"KrakenInvalidArgumentsError while selling {altname}: {e!r}. "
+                "Order was rejected by Kraken."
+            )
+            traceback.print_exc()
+            return False
         except Exception as e:
             print(f"Error while selling {altname}: {e!r}")
             traceback.print_exc()
@@ -280,6 +299,13 @@ class KrakenTrailingSellBot:
 
             try:
                 price = self._get_price(altname)
+            except KrakenUnknownAssetError as e:
+                # Known situation: no such asset pair (e.g. newly listed or special token)
+                print(
+                    f"Skipping {altname}: unknown asset pair {altname}{self.base_currency} "
+                    f"({e!r})"
+                )
+                continue
             except Exception as e:
                 print(f"Failed to fetch price for {altname}: {e!r}")
                 traceback.print_exc()
@@ -307,6 +333,8 @@ class KrakenTrailingSellBot:
                 armed = False
                 realized_pct = ""
 
+            # If we see a non-ACTIVE status but the asset is actually present again,
+            # treat this as a fresh new position.
             if status != "ACTIVE":
                 status = "ACTIVE"
                 cost_basis = price
@@ -314,22 +342,27 @@ class KrakenTrailingSellBot:
                 armed = False
                 realized_pct = ""
 
+            # Compute unrealized percentage P&L
             if cost_basis == 0:
                 unreal_pct = 0.0
             else:
                 unreal_pct = (price - cost_basis) / cost_basis * 100.0
 
+            # Update all-time-high unrealized
             ath_unreal = max(ath_unreal, unreal_pct)
 
             sell_reason = None
 
             if status == "ACTIVE":
                 if armed:
+                    # Trailing take profit: if we've dropped TRAILING_DROP_PCT or more from ATH
                     if (ath_unreal - unreal_pct) >= TRAILING_DROP_PCT:
                         sell_reason = "TRAILING_TAKE_PROFIT"
                 else:
+                    # Hard stop loss if unarmed
                     if unreal_pct <= STOP_LOSS_PCT:
                         sell_reason = "STOP_LOSS"
+                    # Arm the trailing once profitable enough
                     elif unreal_pct >= ARM_THRESHOLD_PCT:
                         armed = True
 

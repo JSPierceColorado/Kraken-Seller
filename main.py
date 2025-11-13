@@ -9,7 +9,8 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 from kraken.spot import User, Market, Trade
-from kraken.exceptions import KrakenException
+# NOTE: Removed:
+# from kraken.exceptions import KrakenException
 
 # ==========================
 # CONFIG / CONSTANTS
@@ -30,15 +31,10 @@ HEADERS = [
     "LastUpdated",      # ISO timestamp
 ]
 
-# Hard-coded rules from your spec
 STOP_LOSS_PCT = -3.0     # sell if unarmed and <= -3%
 ARM_THRESHOLD_PCT = 5.0  # mark as Armed at >= +5%
 TRAILING_DROP_PCT = 3.0  # sell when Armed and ATH - current >= 3%
 
-
-# ==========================
-# HELPER FUNCTIONS
-# ==========================
 
 def get_env_bool(name: str, default: bool = False) -> bool:
     val = os.getenv(name)
@@ -79,13 +75,10 @@ def load_gspread_worksheet() -> gspread.Worksheet:
         )
         ws.append_row(HEADERS, value_input_option="USER_ENTERED")
 
-    # If sheet exists but no headers, ensure they’re present
     existing = ws.row_values(1)
     if not existing:
         ws.append_row(HEADERS, value_input_option="USER_ENTERED")
     elif existing != HEADERS:
-        # Minimal safety: don't auto-rewrite a custom header row,
-        # but you *can* manually align to HEADERS for full functionality.
         print("WARNING: Existing header row differs from expected HEADERS.")
 
     return ws
@@ -126,10 +119,6 @@ def build_row(
     ]
 
 
-# ==========================
-# KRAKEN TRAILING SELL BOT
-# ==========================
-
 class KrakenTrailingSellBot:
     def __init__(self):
         # ENV config
@@ -150,7 +139,6 @@ class KrakenTrailingSellBot:
 
         # Cache Kraken asset info so we can map codes -> altnames
         self.asset_info = self.market.get_assets()
-        # asset_info example: { 'XXBT': {'altname': 'XBT', ...}, ... }
 
         print("KrakenTrailingSellBot initialized.")
         print(f"Base currency: {self.base_currency}")
@@ -183,7 +171,6 @@ class KrakenTrailingSellBot:
             info = self.asset_info.get(asset_code, {})
             altname = info.get("altname", asset_code)
 
-            # Skip base currency & fee token
             if altname.upper() in (self.base_currency, "USD", "EUR"):
                 continue
             if altname.upper() == "KFEE":
@@ -203,7 +190,6 @@ class KrakenTrailingSellBot:
         """
         pair = f"{altname}{self.base_currency}"
         ticker = self.market.get_ticker(pair=pair)
-        # Result dict key may be e.g. 'XXBTZUSD' or 'XBTUSD'; just grab first
         inner = next(iter(ticker.values()))
         last = float(inner["c"][0])
         return last
@@ -230,18 +216,14 @@ class KrakenTrailingSellBot:
                 side="sell",
                 pair=pair,
                 volume=balance,
-                reduce_only=True,  # don't go short by accident
+                reduce_only=True,
             )
             print(f"Kraken order response: {resp}")
             return True
-        except KrakenException as e:
-            print(f"KrakenException while selling {altname}: {e}")
-            traceback.print_exc()
         except Exception as e:
-            print(f"Unexpected error while selling {altname}: {e!r}")
+            print(f"Error while selling {altname}: {e!r}")
             traceback.print_exc()
-
-        return False
+            return False
 
     # ---------- Sheet helpers ----------
 
@@ -263,7 +245,7 @@ class KrakenTrailingSellBot:
             asset = str(rec.get("Asset", "")).strip()
             if not asset:
                 continue
-            row_number = idx + 2  # because row 1 = header
+            row_number = idx + 2  # row 1 = header
             positions[asset] = {"row": row_number, "data": rec}
 
         return positions
@@ -286,22 +268,16 @@ class KrakenTrailingSellBot:
         """
         now_iso = datetime.now(timezone.utc).isoformat()
 
-        # 1) Live Kraken data
         holdings = self._get_holdings()
         print(f"Found {len(holdings)} non-zero holdings on Kraken.")
 
-        # 2) Existing sheet state
         positions = self._read_positions()
-
-        # Keep track of which assets are currently active on Kraken
         active_altnames = set(holdings.keys())
 
-        # 3) First: update/insert holdings and possibly SELL
         for altname, hinfo in holdings.items():
             asset_code = hinfo["asset_code"]
             balance = hinfo["balance"]
 
-            # Get live price
             try:
                 price = self._get_price(altname)
             except Exception as e:
@@ -324,47 +300,39 @@ class KrakenTrailingSellBot:
                 armed = str(armed_raw).strip().lower() in ("true", "1", "yes", "y")
                 realized_pct = rec.get("RealizedPct")
             else:
-                # New asset: start tracking from here
                 row = None
                 status = "ACTIVE"
-                cost_basis = price  # baseline = current price
-                ath_unreal = 0.0
-                armed = False
-                realized_pct = ""
-
-            # Re-open if previously closed but asset reappears
-            if status != "ACTIVE":
-                status = "ACTIVE"
-                # New “campaign” – you could also keep previous basis if you prefer
                 cost_basis = price
                 ath_unreal = 0.0
                 armed = False
                 realized_pct = ""
 
-            # Compute current % gain/loss
+            if status != "ACTIVE":
+                status = "ACTIVE"
+                cost_basis = price
+                ath_unreal = 0.0
+                armed = False
+                realized_pct = ""
+
             if cost_basis == 0:
                 unreal_pct = 0.0
             else:
                 unreal_pct = (price - cost_basis) / cost_basis * 100.0
 
-            # Update all-time high % gain
             ath_unreal = max(ath_unreal, unreal_pct)
 
             sell_reason = None
 
             if status == "ACTIVE":
                 if armed:
-                    # Trailing take profit: sell if drawdown from ATH >= 3%
                     if (ath_unreal - unreal_pct) >= TRAILING_DROP_PCT:
                         sell_reason = "TRAILING_TAKE_PROFIT"
                 else:
-                    # Unarmed: hard -3% stop
                     if unreal_pct <= STOP_LOSS_PCT:
                         sell_reason = "STOP_LOSS"
                     elif unreal_pct >= ARM_THRESHOLD_PCT:
-                        armed = True  # arm at +5%, don't sell yet
+                        armed = True
 
-            # Execute sell if needed
             if sell_reason and balance > 0:
                 print(
                     f"{altname} signal: {sell_reason}, unreal_pct={unreal_pct:.2f}%, "
@@ -372,15 +340,13 @@ class KrakenTrailingSellBot:
                 )
                 sold_ok = self._place_market_sell(altname, balance, sell_reason)
                 if sold_ok:
-                    # Record close with realized %
                     realized_pct = unreal_pct
                     status = "CLOSED"
                     balance = 0.0
-                    unreal_pct = 0.0  # no longer unrealized
+                    unreal_pct = 0.0
                 else:
                     print(f"Sell failed for {altname}; leaving as ACTIVE this cycle.")
 
-            # Prepare row values
             row_values = build_row(
                 asset_alt=altname,
                 asset_code=asset_code,
@@ -403,7 +369,7 @@ class KrakenTrailingSellBot:
                 self._write_row(row, row_values)
                 print(f"Updated row for {altname} (Status={status}).")
 
-        # 4) Mark assets that disappeared from Kraken as CLOSED_EXTERNAL
+        # Mark assets that disappeared from Kraken as CLOSED_EXTERNAL
         for altname, pdata in positions.items():
             if altname in active_altnames:
                 continue
@@ -411,7 +377,7 @@ class KrakenTrailingSellBot:
             rec = pdata["data"]
             status = (rec.get("Status") or "ACTIVE").upper()
             if status != "ACTIVE":
-                continue  # already closed
+                continue
 
             row = pdata["row"]
             asset_code = rec.get("KrakenAssetCode", "")
@@ -422,7 +388,6 @@ class KrakenTrailingSellBot:
             armed_raw = rec.get("Armed")
             armed = str(armed_raw).strip().lower() in ("true", "1", "yes", "y")
 
-            # No Kraken position anymore – treat as externally closed
             row_values = build_row(
                 asset_alt=altname,
                 asset_code=asset_code,
@@ -434,7 +399,7 @@ class KrakenTrailingSellBot:
                 ath_unreal_pct=ath_unreal,
                 armed=armed,
                 status="CLOSED_EXTERNAL",
-                realized_pct="",  # unknown
+                realized_pct="",
                 last_updated=now_iso,
             )
             self._write_row(row, row_values)
@@ -454,10 +419,6 @@ class KrakenTrailingSellBot:
 
             time.sleep(self.poll_interval)
 
-
-# ==========================
-# ENTRYPOINT
-# ==========================
 
 if __name__ == "__main__":
     bot = KrakenTrailingSellBot()

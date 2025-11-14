@@ -58,6 +58,10 @@ STOP_LOSS_PCT = get_env_float("STOP_LOSS_PCT", -3.0)  # sell if unarmed and <= t
 ARM_THRESHOLD_PCT = 5.0   # mark as Armed at >= +5%
 TRAILING_DROP_PCT = 3.0   # sell when Armed and ATH - current >= 3%
 
+# Simple baked-in fee buffer (in percent) to roughly cover Kraken fees
+# e.g. 0.5 ~ 0.5% buffer
+FEE_BUFFER_PCT = 0.5
+
 
 def load_gspread_worksheet() -> gspread.Worksheet:
     """
@@ -161,6 +165,7 @@ class KrakenTrailingSellBot:
         print(f"Polling interval: {self.poll_interval} seconds")
         print(f"Dry run mode: {self.dry_run}")
         print(f"Configured STOP_LOSS_PCT: {STOP_LOSS_PCT}%")
+        print(f"Fee buffer (FEE_BUFFER_PCT): {FEE_BUFFER_PCT}%")
 
     # ---------- Kraken helpers ----------
 
@@ -360,28 +365,37 @@ class KrakenTrailingSellBot:
                 armed = False
                 realized_pct = ""
 
-            # Compute unrealized percentage P&L
+            # Compute unrealized percentage P&L (gross)
             if cost_basis == 0:
                 unreal_pct = 0.0
             else:
                 unreal_pct = (price - cost_basis) / cost_basis * 100.0
 
-            # Update all-time-high unrealized
+            # Update all-time-high unrealized (gross)
             ath_unreal = max(ath_unreal, unreal_pct)
 
             sell_reason = None
 
             if status == "ACTIVE":
                 if armed:
-                    # Trailing take profit: if we've dropped TRAILING_DROP_PCT or more from ATH
-                    if (ath_unreal - unreal_pct) >= TRAILING_DROP_PCT:
+                    # Trailing take profit:
+                    # require an extra FEE_BUFFER_PCT drop so there is room for fees
+                    if (ath_unreal - unreal_pct) >= (TRAILING_DROP_PCT + FEE_BUFFER_PCT):
                         sell_reason = "TRAILING_TAKE_PROFIT"
                 else:
-                    # Hard stop loss if unarmed
-                    if unreal_pct <= STOP_LOSS_PCT:
+                    # Adjust thresholds by the buffer.
+
+                    # STOP loss: trigger a bit earlier (less negative) so after fees
+                    # you end up roughly near your configured STOP_LOSS_PCT.
+                    stop_loss_trigger = STOP_LOSS_PCT + FEE_BUFFER_PCT
+
+                    # ARM threshold: require a bit more profit so that after fees
+                    # you still roughly have ARM_THRESHOLD_PCT.
+                    arm_trigger = ARM_THRESHOLD_PCT + FEE_BUFFER_PCT
+
+                    if unreal_pct <= stop_loss_trigger:
                         sell_reason = "STOP_LOSS"
-                    # Arm the trailing once profitable enough
-                    elif unreal_pct >= ARM_THRESHOLD_PCT:
+                    elif unreal_pct >= arm_trigger:
                         armed = True
 
             if sell_reason and balance > 0:
@@ -391,7 +405,8 @@ class KrakenTrailingSellBot:
                 )
                 sold_ok = self._place_market_sell(altname, balance, sell_reason)
                 if sold_ok:
-                    realized_pct = unreal_pct
+                    # Log a fee-buffered realized P&L approximation
+                    realized_pct = unreal_pct - FEE_BUFFER_PCT
                     status = "CLOSED"
                     balance = 0.0
                     unreal_pct = 0.0

@@ -54,9 +54,9 @@ def get_env_float(name: str, default: float) -> float:
 
 
 # Strategy parameters
-STOP_LOSS_PCT = get_env_float("STOP_LOSS_PCT", -3.0)  # sell if unarmed and <= this %
-ARM_THRESHOLD_PCT = 5.0   # mark as Armed at >= +5%
-TRAILING_DROP_PCT = 3.0   # sell when Armed and ATH - current >= 3%
+STOP_LOSS_PCT = get_env_float("STOP_LOSS_PCT", -3.0)            # sell if unarmed and <= this %
+ARM_THRESHOLD_PCT = get_env_float("ARM_THRESHOLD_PCT", 5.0)     # mark as Armed at >= +5%
+TRAILING_DROP_PCT = get_env_float("TRAILING_DROP_PCT", 3.0)     # sell when Armed and ATH - current >= 3%
 
 # Simple baked-in fee buffer (in percent) to roughly cover Kraken fees
 # e.g. 0.5 ~ 0.5% buffer
@@ -166,6 +166,8 @@ class KrakenTrailingSellBot:
         print(f"Polling interval: {self.poll_interval} seconds")
         print(f"Dry run mode: {self.dry_run}")
         print(f"Configured STOP_LOSS_PCT: {STOP_LOSS_PCT}%")
+        print(f"Configured ARM_THRESHOLD_PCT: {ARM_THRESHOLD_PCT}%")
+        print(f"Configured TRAILING_DROP_PCT: {TRAILING_DROP_PCT}%")
         print(f"Fee buffer (FEE_BUFFER_PCT): {FEE_BUFFER_PCT}%")
         print("NOTE: CostBasis is now expected to be set manually in the sheet.")
 

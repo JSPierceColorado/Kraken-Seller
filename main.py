@@ -301,7 +301,16 @@ class KrakenTrailingSellBot:
         self.ws.update(range_name, [values], value_input_option="USER_ENTERED")
 
     def _append_row(self, values: List[Any]) -> None:
-        self.ws.append_row(values, value_input_option="USER_ENTERED")
+        """
+        Append a new row starting at column A, avoiding any weird internal
+        sheet "table range" offsets that can place data in later columns.
+        """
+        # Number of used rows in column A (including header)
+        last_row = len(self.ws.col_values(1))
+        next_row = last_row + 1  # next empty row after the last used
+
+        range_name = f"A{next_row}:L{next_row}"
+        self.ws.update(range_name, [values], value_input_option="USER_ENTERED")
 
     # ---------- Core logic per cycle ----------
 

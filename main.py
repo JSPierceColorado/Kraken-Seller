@@ -119,8 +119,9 @@ def build_row(
     last_updated: str,
 ) -> List[Any]:
     def fmt(x):
+        # Increased precision: keep up to 10 decimal places for floats
         if isinstance(x, float):
-            return round(x, 6)
+            return round(x, 10)
         return x
 
     return [

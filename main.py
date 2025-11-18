@@ -20,7 +20,7 @@ HEADERS = [
     "KrakenAssetCode",  # Kraken internal code (e.g. XXBT)
     "Pair",             # Trading pair used (e.g. XBTUSD)
     "PositionSize",     # Current size in asset units
-    "CostBasis",        # Entry price used for % calculations
+    "CostBasis",        # Entry price used for % calculations (MANUAL now)
     "CurrentPrice",     # Last price from ticker
     "UnrealizedPct",    # Current % gain/loss (if ACTIVE)
     "ATHUnrealizedPct", # All-time high % gain while tracked
@@ -109,7 +109,7 @@ def build_row(
     asset_code: str,
     pair: str,
     position_size: float,
-    cost_basis: float,
+    cost_basis,
     current_price: float,
     unreal_pct: float,
     ath_unreal_pct: float,
@@ -166,6 +166,7 @@ class KrakenTrailingSellBot:
         print(f"Dry run mode: {self.dry_run}")
         print(f"Configured STOP_LOSS_PCT: {STOP_LOSS_PCT}%")
         print(f"Fee buffer (FEE_BUFFER_PCT): {FEE_BUFFER_PCT}%")
+        print("NOTE: CostBasis is now expected to be set manually in the sheet.")
 
     # ---------- Kraken helpers ----------
 
@@ -307,6 +308,10 @@ class KrakenTrailingSellBot:
         - pull Kraken balances
         - pull/create/update sheet rows
         - enforce stop / arming / trailing TP
+
+        NOTE: CostBasis is no longer auto-set from current price; it must be
+        entered manually in the sheet. Until then, unrealized P&L is treated
+        as 0 and no signals will fire for that position.
         """
         now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -336,40 +341,51 @@ class KrakenTrailingSellBot:
 
             pair = f"{altname}{self.base_currency}"
 
+            # --- Load existing sheet row or create defaults ---
             if altname in positions:
                 row = positions[altname]["row"]
                 rec = positions[altname]["data"]
                 status = (rec.get("Status") or "ACTIVE").upper()
-                cost_basis = rec.get("CostBasis")
+                raw_cost_basis = rec.get("CostBasis")
                 ath_unreal = rec.get("ATHUnrealizedPct")
                 armed_raw = rec.get("Armed")
 
-                cost_basis = float(cost_basis) if str(cost_basis).strip() else price
+                # Separate numeric value (for calculations) from what we write to the sheet
+                if str(raw_cost_basis).strip():
+                    cost_basis_value = float(raw_cost_basis)
+                    cost_basis_cell = cost_basis_value
+                else:
+                    cost_basis_value = 0.0
+                    cost_basis_cell = ""  # leave blank in the sheet
+
                 ath_unreal = float(ath_unreal) if str(ath_unreal).strip() else 0.0
                 armed = str(armed_raw).strip().lower() in ("true", "1", "yes", "y")
                 realized_pct = rec.get("RealizedPct")
             else:
                 row = None
                 status = "ACTIVE"
-                cost_basis = price
+                cost_basis_value = 0.0
+                cost_basis_cell = ""  # new position: you will fill CostBasis manually
                 ath_unreal = 0.0
                 armed = False
                 realized_pct = ""
 
             # If we see a non-ACTIVE status but the asset is actually present again,
-            # treat this as a fresh new position.
+            # treat this as a fresh new position, but do NOT guess the cost basis.
             if status != "ACTIVE":
                 status = "ACTIVE"
-                cost_basis = price
+                cost_basis_value = 0.0
+                cost_basis_cell = ""
                 ath_unreal = 0.0
                 armed = False
                 realized_pct = ""
 
             # Compute unrealized percentage P&L (gross)
-            if cost_basis == 0:
+            # If cost_basis_value is 0 (unknown), treat unrealized as 0 and do nothing.
+            if cost_basis_value == 0:
                 unreal_pct = 0.0
             else:
-                unreal_pct = (price - cost_basis) / cost_basis * 100.0
+                unreal_pct = (price - cost_basis_value) / cost_basis_value * 100.0
 
             # Update all-time-high unrealized (gross)
             ath_unreal = max(ath_unreal, unreal_pct)
@@ -418,7 +434,7 @@ class KrakenTrailingSellBot:
                 asset_code=asset_code,
                 pair=pair,
                 position_size=balance,
-                cost_basis=cost_basis,
+                cost_basis=cost_basis_cell,  # what we actually write to column E
                 current_price=price,
                 unreal_pct=unreal_pct if status == "ACTIVE" else 0.0,
                 ath_unreal_pct=ath_unreal,
@@ -448,7 +464,14 @@ class KrakenTrailingSellBot:
             row = pdata["row"]
             asset_code = rec.get("KrakenAssetCode", "")
             pair = rec.get("Pair", f"{altname}{self.base_currency}")
-            cost_basis = float(rec.get("CostBasis") or 0.0)
+
+            # Preserve blank CostBasis cells; don't invent a 0.
+            raw_cost_basis = rec.get("CostBasis", "")
+            if str(raw_cost_basis).strip():
+                cost_basis_cell = float(raw_cost_basis)
+            else:
+                cost_basis_cell = ""
+
             current_price = float(rec.get("CurrentPrice") or 0.0)
             ath_unreal = float(rec.get("ATHUnrealizedPct") or 0.0)
             armed_raw = rec.get("Armed")
@@ -459,7 +482,7 @@ class KrakenTrailingSellBot:
                 asset_code=asset_code,
                 pair=pair,
                 position_size=0.0,
-                cost_basis=cost_basis,
+                cost_basis=cost_basis_cell,
                 current_price=current_price,
                 unreal_pct=0.0,
                 ath_unreal_pct=ath_unreal,

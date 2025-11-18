@@ -283,8 +283,14 @@ class KrakenTrailingSellBot:
           },
           ...
         }
+
+        Use expected_headers to avoid gspread complaining about duplicate
+        blank header cells.
         """
-        records = self.ws.get_all_records(default_blank="")
+        records = self.ws.get_all_records(
+            default_blank="",
+            expected_headers=HEADERS,
+        )
         positions: Dict[str, Dict[str, Any]] = {}
 
         for idx, rec in enumerate(records):

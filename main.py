@@ -20,7 +20,7 @@ HEADERS = [
     "KrakenAssetCode",  # Kraken internal code (e.g. XXBT)
     "Pair",             # Trading pair used (e.g. XBTUSD)
     "PositionSize",     # Current size in asset units
-    "CostBasis",        # Entry price used for % calculations (MANUAL now)
+    "CostBasis",        # Entry price used for % calculations
     "CurrentPrice",     # Last price from ticker
     "UnrealizedPct",    # Current % gain/loss (if ACTIVE)
     "ATHUnrealizedPct", # All-time high % gain while tracked
@@ -169,7 +169,11 @@ class KrakenTrailingSellBot:
         print(f"Configured ARM_THRESHOLD_PCT: {ARM_THRESHOLD_PCT}%")
         print(f"Configured TRAILING_DROP_PCT: {TRAILING_DROP_PCT}%")
         print(f"Fee buffer (FEE_BUFFER_PCT): {FEE_BUFFER_PCT}%")
-        print("NOTE: CostBasis is now expected to be set manually in the sheet.")
+        print(
+            "CostBasis behavior: "
+            "first time an asset appears, on blank CostBasis, or on reactivation, "
+            "it is initialized to the current price and then kept until you change it."
+        )
 
     # ---------- Kraken helpers ----------
 
@@ -327,9 +331,15 @@ class KrakenTrailingSellBot:
         - pull/create/update sheet rows
         - enforce stop / arming / trailing TP
 
-        NOTE: CostBasis is no longer auto-set from current price; it must be
-        entered manually in the sheet. Until then, unrealized P&L is treated
-        as 0 and no signals will fire for that position.
+        CostBasis behavior:
+        - First time an asset appears, CostBasis is set to the current price.
+        - If a row exists but has blank CostBasis, it is set to the current price.
+        - If an asset was previously CLOSED/CLOSED_EXTERNAL and is seen again
+          in holdings, its row is reactivated (Status=ACTIVE) and CostBasis is
+          reset to the current price.
+        - After that, CostBasis is kept as-is unless you manually change it.
+        - When an asset is CLOSED or CLOSED_EXTERNAL, CostBasis is cleared in
+          the sheet so the next reactivation is treated as fresh.
         """
         now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -365,41 +375,46 @@ class KrakenTrailingSellBot:
                 rec = positions[altname]["data"]
                 status = (rec.get("Status") or "ACTIVE").upper()
                 raw_cost_basis = rec.get("CostBasis")
-                ath_unreal = rec.get("ATHUnrealizedPct")
+                ath_unreal_raw = rec.get("ATHUnrealizedPct")
                 armed_raw = rec.get("Armed")
-
-                # Separate numeric value (for calculations) from what we write to the sheet
-                if str(raw_cost_basis).strip():
-                    cost_basis_value = float(raw_cost_basis)
-                    cost_basis_cell = cost_basis_value
-                else:
-                    cost_basis_value = 0.0
-                    cost_basis_cell = ""  # leave blank in the sheet
-
-                ath_unreal = float(ath_unreal) if str(ath_unreal).strip() else 0.0
-                armed = str(armed_raw).strip().lower() in ("true", "1", "yes", "y")
                 realized_pct = rec.get("RealizedPct")
+
+                # Reactivation case: previously non-ACTIVE, now held again.
+                if status != "ACTIVE":
+                    status = "ACTIVE"
+                    cost_basis_value = price
+                    cost_basis_cell = price
+                    ath_unreal = 0.0
+                    armed = False
+                    realized_pct = ""
+                else:
+                    # ACTIVE row
+                    if str(raw_cost_basis).strip():
+                        cost_basis_value = float(raw_cost_basis)
+                        cost_basis_cell = cost_basis_value
+                    else:
+                        # Blank CostBasis on an ACTIVE row -> initialize to current price
+                        cost_basis_value = price
+                        cost_basis_cell = price
+
+                    ath_unreal = (
+                        float(ath_unreal_raw)
+                        if str(ath_unreal_raw).strip()
+                        else 0.0
+                    )
+                    armed = str(armed_raw).strip().lower() in ("true", "1", "yes", "y")
             else:
+                # New asset: first time it appears in the sheet,
+                # initialize CostBasis to the current price.
                 row = None
                 status = "ACTIVE"
-                cost_basis_value = 0.0
-                cost_basis_cell = ""  # new position: you will fill CostBasis manually
-                ath_unreal = 0.0
-                armed = False
-                realized_pct = ""
-
-            # If we see a non-ACTIVE status but the asset is actually present again,
-            # treat this as a fresh new position, but do NOT guess the cost basis.
-            if status != "ACTIVE":
-                status = "ACTIVE"
-                cost_basis_value = 0.0
-                cost_basis_cell = ""
+                cost_basis_value = price
+                cost_basis_cell = price
                 ath_unreal = 0.0
                 armed = False
                 realized_pct = ""
 
             # Compute unrealized percentage P&L (gross)
-            # If cost_basis_value is 0 (unknown), treat unrealized as 0 and do nothing.
             if cost_basis_value == 0:
                 unreal_pct = 0.0
             else:
@@ -444,6 +459,9 @@ class KrakenTrailingSellBot:
                     status = "CLOSED"
                     balance = 0.0
                     unreal_pct = 0.0
+                    # Clear CostBasis on close so reactivation is fresh
+                    cost_basis_value = 0.0
+                    cost_basis_cell = ""
                 else:
                     print(f"Sell failed for {altname}; leaving as ACTIVE this cycle.")
 
@@ -452,7 +470,7 @@ class KrakenTrailingSellBot:
                 asset_code=asset_code,
                 pair=pair,
                 position_size=balance,
-                cost_basis=cost_basis_cell,  # what we actually write to column E
+                cost_basis=cost_basis_cell,
                 current_price=price,
                 unreal_pct=unreal_pct if status == "ACTIVE" else 0.0,
                 ath_unreal_pct=ath_unreal,
@@ -483,13 +501,10 @@ class KrakenTrailingSellBot:
             asset_code = rec.get("KrakenAssetCode", "")
             pair = rec.get("Pair", f"{altname}{self.base_currency}")
 
-            # Preserve blank CostBasis cells; don't invent a 0.
-            raw_cost_basis = rec.get("CostBasis", "")
-            if str(raw_cost_basis).strip():
-                cost_basis_cell = float(raw_cost_basis)
-            else:
-                cost_basis_cell = ""
-
+            # When an asset disappears from holdings without this bot selling it,
+            # mark it as CLOSED_EXTERNAL and clear CostBasis so a future position
+            # is treated as fresh.
+            cost_basis_cell = ""  # clear
             current_price = float(rec.get("CurrentPrice") or 0.0)
             ath_unreal = float(rec.get("ATHUnrealizedPct") or 0.0)
             armed_raw = rec.get("Armed")
@@ -510,7 +525,10 @@ class KrakenTrailingSellBot:
                 last_updated=now_iso,
             )
             self._write_row(row, row_values)
-            print(f"{altname} no longer on Kraken. Marked as CLOSED_EXTERNAL.")
+            print(
+                f"{altname} no longer on Kraken. "
+                f"Marked as CLOSED_EXTERNAL and cleared CostBasis."
+            )
 
     def run_forever(self):
         print("Starting main loop. Ctrl+C to exit (locally).")
